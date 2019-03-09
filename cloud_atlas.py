@@ -16,6 +16,12 @@ tf.app.flags.DEFINE_integer('batch_size', 128, '''number of images to process in
 tf.app.flags.DEFINE_string('data_dir', './data', '''Path to categorized cloud images''')
 tf.app.flags.DEFINE_boolean('use_fp16', './data', '''Train the model using floating point 16 vars''')
 
+# Constants describing the training process.
+MOVING_AVERAGE_DECAY = 0.9999     # The decay to use for the moving average.
+NUM_EPOCHS_PER_DECAY = 350.0      # Epochs after which learning rate decays.
+LEARNING_RATE_DECAY_FACTOR = 0.1  # Learning rate decay factor.
+INITIAL_LEARNING_RATE = 0.1       # Initial learning rate.
+
 # If a model is trained with multiple GPUs, prefix all Op names with tower_name
 # to differentiate the operations. Note that this prefix is removed from the
 # names of the summaries when visualizing a model.
@@ -62,6 +68,7 @@ def inputs(eval_data):
     return images, labels
 
 def inference(images):
+    # TODO(dstone): the most important thing here is processing the images so the cloud images are CIFAR-like
     '''Build the model for a cloud atlas.
 
     :param images: images returned from distorted_inputs() or inputs()
@@ -106,5 +113,134 @@ def inference(images):
     pool2 = tf.nn.max_pool(norm2, ksize=[1, 3, 3, 1], strides=[1, 2, 2, 1], padding='SAME', name='pool2')
 
     # local3
-    # TODO(dstone): copy over rest of model from tensorflow_models/tutorials/images/cifar10/cifar10.py
+    with tf.variable.scope('local3') as scope:
+        # move everythign into depth so we can perform a single matrix multiply
+        reshape = tf.reshape(pool2, [images.get_shape().as_list()[0], -1])
+        dim = reshape.get_shape()[1].value
+        weights = _variable_with_weight_decay('weights', 
+                                              shape=[dim, 384], # TODO(dstone): do these parameters need to change?
+                                              stdev=0.04,
+                                              wd=0.004)
+        biases = _variable_on_cpu('biases', [384], tf.constant_initializer(0.1))
+        local3 = tf.nn.relu(tf.matmul(reshape, weights) + biases, name=scope.name)
+        _activation_summary(local3)
 
+    # local4
+    with tf.variable_scope('local4') as scope:
+        weights = _variable_with_weight_decay('weights', shape=[384, 192],
+                                              stddev=0.04, wd=0.004)
+        biases = _variable_on_cpu('biases', [192], tf.constant_initializer(0.1))
+        local4 = tf.nn.relu(tf.matmul(local3, weights) + biases, name=scope.name)
+        _activation_summary(local4)
+
+    # linear layer (Wx + b)
+    # we don't apply softmax here because tf.nn.spare_softmax_cross_entropy_with_logits accepts the unsacled logits
+    # and performs the softmax internally for efficiency
+    with tf.variable_scope('softmax_linear') as scope:
+        weights = _variable_with_weight_decay('weights', [192, NUM_CLASSES],
+                                              stddev=1 / 192.0, wd=None)
+        biases = _variable_on_cpu('biases', [NUM_CLASSES],
+                                  tf.constant_initializer(0.0))
+        softmax_linear = tf.add(tf.matmul(local4, weights), biases, name=scope.name)
+        _activation_summary(softmax_linear)
+
+    return softmax_linear
+
+
+def loss(logits, labels):
+    """Add L2Loss to all the trainable variables.
+      Add summary for "Loss" and "Loss/avg".
+      Args:
+        logits: Logits from inference().
+        labels: Labels from distorted_inputs or inputs(). 1-D tensor
+                of shape [batch_size]
+      Returns:
+        Loss tensor of type float.
+    """
+    # calculate the average cross entropy loss across the batch
+    labels = tf.cast(laberls, tf.int64)
+    cross_entropy = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=labels,
+                                                                   logits=logits,
+                                                                   name='cross_entropy_per_example')
+    cross_entropy_mean = tf.reduce_mean(cross_entropy, name='cross_entropy')
+    tf.add_to_collection('losses', cross_entropy_mean)
+
+    # The total loss is defined as the cross entropy loss plus all of the weight
+    # decay terms (L2 loss).
+    return tf.add_n(tf.get_collection('losses'), name='total_loss')
+
+
+def _add_loss_summaries(total_loss):
+  """Add summaries for losses in CIFAR-10 model.
+  Generates moving average for all losses and associated summaries for
+  visualizing the performance of the network.
+  Args:
+    total_loss: Total loss from loss().
+  Returns:
+    loss_averages_op: op for generating moving averages of losses.
+  """
+  # Compute the moving average of all individual losses and the total loss.
+  loss_averages = tf.train.ExponentialMovingAverage(0.9, name='avg')
+  losses = tf.get_collection('losses')
+  loss_averages_op = loss_averages.apply(losses + [total_loss])
+
+  # Attach a scalar summary to all individual losses and the total loss; do the
+  # same for the averaged version of the losses.
+  for l in losses + [total_loss]:
+    # Name each loss as '(raw)' and name the moving average version of the loss
+    # as the original loss name.
+    tf.summary.scalar(l.op.name + ' (raw)', l)
+    tf.summary.scalar(l.op.name, loss_averages.average(l))
+
+  return loss_averages_op
+
+
+def train(total_loss, global_step):
+    """Train cloud atlas model.
+      Create an optimizer and apply to all trainable variables. Add moving
+      average for all trainable variables.
+      Args:
+        total_loss: Total loss from loss().
+        global_step: Integer Variable counting the number of training steps
+          processed.
+      Returns:
+        train_op: op for training.
+    """
+    # variables taht affect learning rate
+    num_bathces_per_epoch = NUM_EXAMPLES_PER_EPOCH_FOR_TRAIN / FLAGS.batch_size
+    decay_steps = int(num_batches_per_epoch * NUM_EPOCHS_PER_DECAY)
+
+    # decay the learning rate exponentially based on the number of steps
+    lr = tf.train.exponential_decay(INITIAL_LEARNING_RATE,
+                                    global_step,
+                                    decay_steps,
+                                    LEARNING_RATE_DECAY_FACTOR,
+                                    staircase=True)
+    tf.summary.scalar('learning_rate', lr)
+
+    # generate moving averages of all losses and associated summaries
+    loss_averages_op = _add_loss_summaries(total_loss)
+
+    # compute gradients
+    with tf.control_dependencies([loss_averages_op]):
+        opt = tf.train.GradientDescentOptimizer(lr)
+        grads = opt.compute_gradients(total_loss)
+
+    # apply gradients
+    apply_gradient_op = opt.apply_gradients(grads, global_step=global_step)
+
+    # add histograms for trainable variables
+    for var in tf.trainable_variables():
+        tf.summary.histogram(var.op.name, var)
+
+    # add histograms for gradients
+    for grad, var in grads:
+        if grad is not None:
+            tf.summary.histogram(var.op.name + '/gradients', grad)
+
+    # track moving averages of all trainable variables
+    variable_averages = tf.train.ExponentialMovingAverage(MOVING_AVERAGE_DECAY, global_step)
+    with tf.control_dependencies([apply_gradient_op]):
+        variables_averages_op = variable_averages.apply(tf.trainable_variables)
+
+    return variables_averages_op

@@ -43,9 +43,9 @@ def arguments():
     parser.add_argument('-s', '--size',
                         help='Image size to use. Should be "icon", "medium", "large", or a custom size '
                              'of the form "NxM", N and M integers',
-                             type=str,
-                             default='medium',
-                             required=False)
+                        type=str,
+                        default='medium',
+                        required=False)
     args = parser.parse_args()
     return args, parser
 
