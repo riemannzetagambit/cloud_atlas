@@ -1,12 +1,22 @@
 from tensorflow.compat import v1 as tf
 
+if __name__ == '__main__' and __package__ is None:
+    # run this if executing as a script
+    from os import sys, path
+    # for constants
+    sys.path.append(path.abspath(path.join(path.dirname(__file__), '..')))
+from constants import CLOUD_TYPES
 
 def model():
+    # NOTE: change
     _IMAGE_SIZE = 32
+    # NOTE: change
     _IMAGE_CHANNELS = 3
-    _NUM_CLASSES = 10
+    _NUM_CLASSES = len(CLOUD_TYPES)
 
     with tf.name_scope('main_params'):
+        # use this link to crop images to the desired size:
+        # https://www.tensorflow.org/api_docs/python/tf/image/crop_to_bounding_box
         x = tf.placeholder(tf.float32, shape=[None, _IMAGE_SIZE * _IMAGE_SIZE * _IMAGE_CHANNELS], name='Input')
         y = tf.placeholder(tf.float32, shape=[None, _NUM_CLASSES], name='Output')
         x_image = tf.reshape(x, [-1, _IMAGE_SIZE, _IMAGE_SIZE, _IMAGE_CHANNELS], name='images')

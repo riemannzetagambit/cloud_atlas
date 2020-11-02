@@ -8,6 +8,7 @@ from include.data import get_data_set
 from include.model import model, lr
 
 
+# NOTE: change
 train_x, train_y = get_data_set("train")
 test_x, test_y = get_data_set("test")
 tf.set_random_seed(21)
@@ -19,6 +20,7 @@ epoch_start = 0
 # PARAMS
 _BATCH_SIZE = 128
 _EPOCH = 60
+# NOTE: change
 _SAVE_PATH = "./tensorboard/cifar-10-v1.0.0/"
 
 
@@ -139,6 +141,9 @@ def main():
 
 
 if __name__ == "__main__":
+    # NOTE: change
+    # add in args here to point to the data. change the `get_data_set` code to load and chop the data
+    # to size so it can be used in te the training
     main()
 
 
